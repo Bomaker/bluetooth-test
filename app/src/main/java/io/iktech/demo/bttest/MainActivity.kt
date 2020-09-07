@@ -197,7 +197,7 @@ class BluetoothServerController(activity: MainActivity) : Thread() {
             this.cancelled = true
         }
 
-    }
+    } 
 
     override fun run() {
         var socket: BluetoothSocket? = null
