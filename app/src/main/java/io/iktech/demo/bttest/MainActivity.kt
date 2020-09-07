@@ -27,8 +27,39 @@ import java.util.*
 var devices = ArrayList<BluetoothDevice>()
 var devicesMap = HashMap<String, BluetoothDevice>()
 var mArrayAdapter: ArrayAdapter<String>? = null
-val uuid: UUID = UUID.fromString("8989063a-c9af-463a-b3f1-f21d9b2b827b")
+val uuid: UUID = UUID.fromString("00001101-0000-1000-8000-00805f9b34fb") //  uuid for RFComm. Works with Arduino and teraterm
 var message = ""
+
+/*
+Workflow
+
+In general, transmitting data over bluetooth is not much different from transmitting them via the other channels:
+
+    Receiving party creates a server that waits for the clients to connect
+    Sending party initiates the connection, both sides getting sockets for data transmission
+    Parties exchange data
+    https://medium.com/@ikolomiyets/transferring-data-between-android-devices-over-bluetooth-with-kotlin-3cab7e5ca0d2
+
+                                                                 +-------------------+
+                                                   1.connect     |                   |
+                            +--------------+    +----------------| Server controller |
+                            |              |    |                |                   |
+                            |   Client     |----|                +--------|----------+
+                            |              |    |                         | 2.socket
+                            +--------------+    |                         |
+                                                |3.transmission  +-------------------+
+                                                |                |                   |
+                                                |----------------|      Server       |
+                                                                 |                   |
+                                                                 +-------------------+
+    Receiving party creates a Server Controller, which is running in its own thread. Server Controller creates a service
+    listener identified by the name and UUID. The clients then will use the UUID to access a specific service. Listener
+    creates a Server Socket that placed into waiting state using accept() method.
+    The client on the other hand, initiates a connection to the specified device attempting to access the service, that
+    is identified by UUID. Once connection is established, accept() method call returns a socket object, which is used
+    to create a Server thread that used to communicate with the client.
+    Once exchange is over, both sides should close the sockets.
+*/
 
 class MainActivity : AppCompatActivity() {
     private var textView: TextView? = null
@@ -45,10 +76,13 @@ class MainActivity : AppCompatActivity() {
         val button = findViewById<Button>(R.id.button)
         button.setOnClickListener {view ->
             if (BluetoothAdapter.getDefaultAdapter() == null) {
+                Log.i("xxxserver", "Bluetooth is disabled")
+
                 Snackbar.make(view, "Bluetooth is disabled", Snackbar.LENGTH_LONG)
                     .setAction("Action", null).show()
 
             } else {
+
                 devicesMap = HashMap()
                 devices = ArrayList()
                 mArrayAdapter!!.clear()
@@ -72,6 +106,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         BluetoothServerController(this).start()
+    }
+    override fun onDestroy() {
+        super.onDestroy()
+
+        Log.i("xxxserver", "onDestroy")
+        //Runtime.getRuntime().exit(0) just a try
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
@@ -133,15 +173,24 @@ class MainActivity : AppCompatActivity() {
 
 }
 
+/*
+    Create a server socket, identified by the uuid, in the class constructor
+    Once thread execution started wait for the client connections using accept() method
+    Once client established connection accept() method returns a BluetoothSocket reference
+    that gives access to the input and output streams. We use this socket to start the Server thread.
+
+ */
+
 class BluetoothServerController(activity: MainActivity) : Thread() {
     private var cancelled: Boolean
-    private val serverSocket: BluetoothServerSocket?
+    private val serverSocket: BluetoothServerSocket? // does not receive in server mode
     private val activity = activity
 
     init {
         val btAdapter = BluetoothAdapter.getDefaultAdapter()
         if (btAdapter != null) {
-            this.serverSocket = btAdapter.listenUsingRfcommWithServiceRecord("test", uuid)
+            this.serverSocket = btAdapter.listenUsingInsecureRfcommWithServiceRecord("Android", uuid) // not sure what name is required
+            //    this.serverSocket = btAdapter.listenUsingRfcommWithServiceRecord("test", uuid) no difference
             this.cancelled = false
         } else {
             this.serverSocket = null
@@ -151,21 +200,32 @@ class BluetoothServerController(activity: MainActivity) : Thread() {
     }
 
     override fun run() {
-        var socket: BluetoothSocket
+        var socket: BluetoothSocket? = null
+
 
         while(true) {
+            Log.i("xxxserver", "Socket to define")
+
             if (this.cancelled) {
+                Log.i("xxxserver", "Cancelled")
                 break
             }
+            Log.i("xxxserver", "Cancelled: "+ this.cancelled.toString() +  " Socket: " + socket.toString())
 
             try {
-                socket = serverSocket!!.accept()
+                Log.i("xxxserver", "Define Socket")
+                // Always gives timeout on a China phone. Does not al all work on lifetab!!!!
+                socket = serverSocket!!.accept(5000)
+
+                Log.i("xxxserver", "Defined Socket" + socket.toString())
             } catch(e: IOException) {
+                Log.i("xxxserver", "No socket")
                 break
             }
+            Log.i("xxxserver", "again Cancelled?  "+ this.cancelled.toString() +  " Socket: " + socket.toString())
 
             if (!this.cancelled && socket != null) {
-                Log.i("server", "Connecting")
+                Log.i("xxxserver", "Connecting to socket")
                 BluetoothServer(this.activity, socket).start()
             }
         }
@@ -173,29 +233,39 @@ class BluetoothServerController(activity: MainActivity) : Thread() {
 
     fun cancel() {
         this.cancelled = true
-        this.serverSocket!!.close()
+        try {
+            this.serverSocket!!.close()
+        }
+        catch (e: IOException) {
+            Log.i("xxxserver", "Cannot close socket")
+        }
     }
 }
+
+
 
 class BluetoothServer(private val activity: MainActivity, private val socket: BluetoothSocket): Thread() {
     private val inputStream = this.socket.inputStream
     private val outputStream = this.socket.outputStream
 
     override fun run() {
+        Log.i("xxxserver", "Trying Reading")
+
         try {
             val available = inputStream.available()
             val bytes = ByteArray(available)
-            Log.i("server", "Reading")
+            Log.i("xxxserver", "Reading")
             inputStream.read(bytes, 0, available)
             val text = String(bytes)
-            Log.i("server", "Message received")
-            Log.i("server", text)
+            Log.i("xxxserver", "Message received")
+            Log.i("xxxserver", text)
             activity.appendText(text)
         } catch (e: Exception) {
-            Log.e("client", "Cannot read data", e)
+            Log.e("xxxclient", "Cannot read data", e)
         } finally {
             inputStream.close()
             outputStream.close()
+            Thread.sleep(1000)
             socket.close()
         }
     }
@@ -207,7 +277,9 @@ class SelectDeviceDialog: DialogFragment() {
         builder.setTitle("Send message to")
         builder.setAdapter(mArrayAdapter) { _, which: Int ->
             BluetoothAdapter.getDefaultAdapter().cancelDiscovery()
-            BluetoothClient(devices[which]).start()
+            Log.i("xxxclient", "connecting to:" + devices[which].toString())
+
+            BluetoothClient(device = devices[which]).start()
         }
 
         return builder.create()
@@ -222,22 +294,24 @@ class BluetoothClient(device: BluetoothDevice): Thread() {
     private val socket = device.createRfcommSocketToServiceRecord(uuid)
 
     override fun run() {
-        Log.i("client", "Connecting")
+        Log.i("xxxclient", "Connecting client now")
         this.socket.connect()
 
-        Log.i("client", "Sending")
+        Log.i("xxxclient", "Sending")
         val outputStream = this.socket.outputStream
         val inputStream = this.socket.inputStream
         try {
             outputStream.write(message.toByteArray())
             outputStream.flush()
-            Log.i("client", "Sent")
+            Log.i("xxxclient", "Sent")
         } catch(e: Exception) {
-            Log.e("client", "Cannot send", e)
+            Log.e("xxxclient", "Cannot send", e)
         } finally {
             outputStream.close()
             inputStream.close()
+            Thread.sleep(1000)
             this.socket.close()
         }
+
     }
 }
